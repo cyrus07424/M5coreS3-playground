@@ -13,6 +13,7 @@ constexpr int16_t RETICLE_RADIUS = 8;
 constexpr double CAMERA_SCALE = 42.0;
 constexpr bool SHOW_AAM_LABEL = false;
 constexpr bool SHOW_GUN_HEAT_LABEL = false;
+constexpr uint16_t TOUCH_UI_TRANSPARENT = 0xF81F;
 }
 
 struct Rect {
@@ -65,6 +66,19 @@ struct TouchInputState {
   bool shoot = false;
   bool boost = false;
   TouchAction released_action = TouchAction::None;
+};
+
+struct TouchVisualState {
+  bool pitch_up = false;
+  bool pitch_down = false;
+  bool roll_left = false;
+  bool roll_right = false;
+  bool fire = false;
+  bool boost = false;
+  bool reset = false;
+  bool toggle_chrome = false;
+  bool toggle_menu = false;
+  bool toggle_auto = false;
 };
 
 struct Vec3 {
@@ -398,14 +412,25 @@ class GameWorld {
 };
 
 M5Canvas g_canvas(&M5.Display);
+M5Canvas g_touch_ui_cache(&M5.Display);
 GameWorld g_world;
 bool g_needs_redraw = true;
+bool g_touch_ui_dirty = true;
 uint32_t g_last_frame_ms = 0;
 bool g_prev_menu_up = false;
 bool g_prev_menu_down = false;
+TouchLayout g_touch_layout = {};
 
 double rand_unit() {
   return static_cast<double>(random(0, 1000000L)) / 1000000.0;
+}
+
+int ground_render_stride(const M5Canvas& canvas) {
+  return canvas.width() >= 320 ? 2 : 1;
+}
+
+bool should_sample_ground_index(int index, int stride) {
+  return stride <= 1 || index == 0 || index == app_config::GSCALE - 1 || (index % stride) == 0;
 }
 
 TouchLayout build_touch_layout(int16_t display_w, int16_t display_h) {
@@ -496,17 +521,16 @@ void apply_hold_action(TouchAction action, TouchInputState& input) {
 
 TouchInputState read_touch_input() {
   TouchInputState input{};
-  const TouchLayout layout = build_touch_layout(M5.Display.width(), M5.Display.height());
   const auto touch_count = M5.Touch.getCount();
 
   for (size_t i = 0; i < touch_count; ++i) {
     auto detail = M5.Touch.getDetail(i);
-    apply_hold_action(action_from_point(layout, detail.x, detail.y), input);
+    apply_hold_action(action_from_point(g_touch_layout, detail.x, detail.y), input);
 
     if (detail.wasReleased()) {
-      TouchAction released_action = action_from_point(layout, detail.base.x, detail.base.y);
+      TouchAction released_action = action_from_point(g_touch_layout, detail.base.x, detail.base.y);
       if (released_action == TouchAction::None) {
-        released_action = action_from_point(layout, detail.x, detail.y);
+        released_action = action_from_point(g_touch_layout, detail.x, detail.y);
       }
       if (released_action != TouchAction::None) {
         input.released_action = released_action;
@@ -555,6 +579,7 @@ void reset_stage_preserve_ui(GameWorld& world) {
   world.ui_footer_visible = ui_footer_visible;
   world.menu_index = menu_index;
   world.menu_scroll = menu_scroll;
+  g_touch_ui_dirty = true;
   g_needs_redraw = true;
 }
 
@@ -1786,6 +1811,7 @@ void GameWorld::fillBarc(M5Canvas& canvas, const Vec3& p) {
 void GameWorld::writeGround(M5Canvas& canvas) {
   Vec3 p;
   const double step = app_config::FMAX * 2.0 / app_config::GSCALE;
+  const int stride = ground_render_stride(canvas);
   const int dx = static_cast<int>(plane[0].pVel.x / step);
   const int dy = static_cast<int>(plane[0].pVel.y / step);
   const double sx = dx * step;
@@ -1793,25 +1819,51 @@ void GameWorld::writeGround(M5Canvas& canvas) {
 
   double my = -app_config::FMAX;
   for (int j = 0; j < app_config::GSCALE; ++j) {
+    if (!should_sample_ground_index(j, stride)) {
+      my += step;
+      continue;
+    }
     double mx = -app_config::FMAX;
     for (int i = 0; i < app_config::GSCALE; ++i) {
-      p.x = mx + sx;
-      p.y = my + sy;
-      p.z = gHeight(mx + sx, my + sy);
-      change3d(plane[0], p, ground_pos[j][i]);
+      if (should_sample_ground_index(i, stride)) {
+        p.x = mx + sx;
+        p.y = my + sy;
+        p.z = gHeight(mx + sx, my + sy);
+        change3d(plane[0], p, ground_pos[j][i]);
+      }
       mx += step;
     }
     my += step;
   }
 
   for (int j = 0; j < app_config::GSCALE; ++j) {
-    for (int i = 0; i < app_config::GSCALE - 1; ++i) {
-      drawSline(canvas, ground_pos[j][i], ground_pos[j][i + 1], TFT_DARKGREEN);
+    if (!should_sample_ground_index(j, stride)) {
+      continue;
+    }
+    int prev_i = -1;
+    for (int i = 0; i < app_config::GSCALE; ++i) {
+      if (!should_sample_ground_index(i, stride)) {
+        continue;
+      }
+      if (prev_i >= 0) {
+        drawSline(canvas, ground_pos[j][prev_i], ground_pos[j][i], TFT_DARKGREEN);
+      }
+      prev_i = i;
     }
   }
   for (int i = 0; i < app_config::GSCALE; ++i) {
-    for (int j = 0; j < app_config::GSCALE - 1; ++j) {
-      drawSline(canvas, ground_pos[j][i], ground_pos[j + 1][i], TFT_DARKGREEN);
+    if (!should_sample_ground_index(i, stride)) {
+      continue;
+    }
+    int prev_j = -1;
+    for (int j = 0; j < app_config::GSCALE; ++j) {
+      if (!should_sample_ground_index(j, stride)) {
+        continue;
+      }
+      if (prev_j >= 0) {
+        drawSline(canvas, ground_pos[prev_j][i], ground_pos[j][i], TFT_DARKGREEN);
+      }
+      prev_j = j;
     }
   }
 }
@@ -2526,15 +2578,47 @@ void draw_gun_heat_bar(M5Canvas& canvas, const Plane& player) {
   }
 }
 
-bool is_touch_rect_active(const Rect& rect) {
+TouchVisualState read_touch_visual_state() {
+  TouchVisualState state{};
   const auto touch_count = M5.Touch.getCount();
   for (size_t i = 0; i < touch_count; ++i) {
     const auto detail = M5.Touch.getDetail(i);
-    if (rect.contains(detail.x, detail.y)) {
-      return true;
+    switch (action_from_point(g_touch_layout, detail.x, detail.y)) {
+      case TouchAction::PitchUp:
+        state.pitch_up = true;
+        break;
+      case TouchAction::PitchDown:
+        state.pitch_down = true;
+        break;
+      case TouchAction::RollLeft:
+        state.roll_left = true;
+        break;
+      case TouchAction::RollRight:
+        state.roll_right = true;
+        break;
+      case TouchAction::Fire:
+        state.fire = true;
+        break;
+      case TouchAction::Boost:
+        state.boost = true;
+        break;
+      case TouchAction::Reset:
+        state.reset = true;
+        break;
+      case TouchAction::ToggleChrome:
+        state.toggle_chrome = true;
+        break;
+      case TouchAction::ToggleMenu:
+        state.toggle_menu = true;
+        break;
+      case TouchAction::ToggleAuto:
+        state.toggle_auto = true;
+        break;
+      default:
+        break;
     }
   }
-  return false;
+  return state;
 }
 
 void draw_touch_button(
@@ -2550,37 +2634,70 @@ void draw_touch_button(
   canvas.print(label);
 }
 
-void draw_touch_controls(M5Canvas& canvas, const GameWorld& world) {
-  const TouchLayout layout = build_touch_layout(canvas.width(), canvas.height());
-  draw_touch_button(canvas, layout.reset, "RST", is_touch_rect_active(layout.reset), TFT_ORANGE);
+void rebuild_touch_ui_cache(const GameWorld& world) {
+  g_touch_ui_cache.fillRect(
+      0, 0, g_touch_ui_cache.width(), g_touch_ui_cache.height(), app_config::TOUCH_UI_TRANSPARENT);
+  draw_touch_button(g_touch_ui_cache, g_touch_layout.reset, "RST", false, TFT_ORANGE);
+  draw_touch_button(g_touch_ui_cache, g_touch_layout.toggle_chrome, "HUD", !world.chrome_visible, TFT_DARKGREY);
+  draw_touch_button(g_touch_ui_cache, g_touch_layout.toggle_menu, "MENU", world.menu_visible, TFT_ORANGE);
   draw_touch_button(
-      canvas,
-      layout.toggle_chrome,
-      "HUD",
-      is_touch_rect_active(layout.toggle_chrome) || !world.chrome_visible,
-      TFT_DARKGREY);
-  draw_touch_button(
-      canvas,
-      layout.toggle_menu,
-      "MENU",
-      is_touch_rect_active(layout.toggle_menu) || world.menu_visible,
-      TFT_ORANGE);
-  draw_touch_button(
-      canvas,
-      layout.toggle_auto,
+      g_touch_ui_cache,
+      g_touch_layout.toggle_auto,
       world.menu_visible ? "OK" : "AUTO",
-      is_touch_rect_active(layout.toggle_auto) || (!world.menu_visible && world.auto_flight),
+      !world.menu_visible && world.auto_flight,
       world.menu_visible ? TFT_ORANGE : TFT_CYAN);
+  draw_touch_button(g_touch_ui_cache, g_touch_layout.pitch_up, "UP", false, TFT_GREENYELLOW);
+  draw_touch_button(g_touch_ui_cache, g_touch_layout.pitch_down, "DN", false, TFT_GREENYELLOW);
+  draw_touch_button(g_touch_ui_cache, g_touch_layout.roll_left, "LT", false, TFT_GREENYELLOW);
+  draw_touch_button(g_touch_ui_cache, g_touch_layout.roll_right, "RT", false, TFT_GREENYELLOW);
+  draw_touch_button(g_touch_ui_cache, g_touch_layout.boost, "BOOST", false, TFT_GREEN);
+  draw_touch_button(g_touch_ui_cache, g_touch_layout.fire, "FIRE", false, TFT_RED);
+  g_touch_ui_dirty = false;
+}
 
-  draw_touch_button(canvas, layout.pitch_up, "UP", is_touch_rect_active(layout.pitch_up), TFT_GREENYELLOW);
-  draw_touch_button(
-      canvas, layout.pitch_down, "DN", is_touch_rect_active(layout.pitch_down), TFT_GREENYELLOW);
-  draw_touch_button(
-      canvas, layout.roll_left, "LT", is_touch_rect_active(layout.roll_left), TFT_GREENYELLOW);
-  draw_touch_button(
-      canvas, layout.roll_right, "RT", is_touch_rect_active(layout.roll_right), TFT_GREENYELLOW);
-  draw_touch_button(canvas, layout.boost, "BOOST", is_touch_rect_active(layout.boost), TFT_GREEN);
-  draw_touch_button(canvas, layout.fire, "FIRE", is_touch_rect_active(layout.fire), TFT_RED);
+void draw_touch_controls(M5Canvas& canvas, const GameWorld& world) {
+  if (g_touch_ui_dirty) {
+    rebuild_touch_ui_cache(world);
+  }
+
+  g_touch_ui_cache.pushSprite(&canvas, 0, 0, app_config::TOUCH_UI_TRANSPARENT);
+
+  const TouchVisualState touch_state = read_touch_visual_state();
+  if (touch_state.reset) {
+    draw_touch_button(canvas, g_touch_layout.reset, "RST", true, TFT_ORANGE);
+  }
+  if (touch_state.toggle_chrome) {
+    draw_touch_button(canvas, g_touch_layout.toggle_chrome, "HUD", true, TFT_DARKGREY);
+  }
+  if (touch_state.toggle_menu) {
+    draw_touch_button(canvas, g_touch_layout.toggle_menu, "MENU", true, TFT_ORANGE);
+  }
+  if (touch_state.toggle_auto) {
+    draw_touch_button(
+        canvas,
+        g_touch_layout.toggle_auto,
+        world.menu_visible ? "OK" : "AUTO",
+        true,
+        world.menu_visible ? TFT_ORANGE : TFT_CYAN);
+  }
+  if (touch_state.pitch_up) {
+    draw_touch_button(canvas, g_touch_layout.pitch_up, "UP", true, TFT_GREENYELLOW);
+  }
+  if (touch_state.pitch_down) {
+    draw_touch_button(canvas, g_touch_layout.pitch_down, "DN", true, TFT_GREENYELLOW);
+  }
+  if (touch_state.roll_left) {
+    draw_touch_button(canvas, g_touch_layout.roll_left, "LT", true, TFT_GREENYELLOW);
+  }
+  if (touch_state.roll_right) {
+    draw_touch_button(canvas, g_touch_layout.roll_right, "RT", true, TFT_GREENYELLOW);
+  }
+  if (touch_state.boost) {
+    draw_touch_button(canvas, g_touch_layout.boost, "BOOST", true, TFT_GREEN);
+  }
+  if (touch_state.fire) {
+    draw_touch_button(canvas, g_touch_layout.fire, "FIRE", true, TFT_RED);
+  }
 }
 
 void draw_hud(M5Canvas& canvas, const GameWorld& world) {
@@ -2688,6 +2805,7 @@ void update_controls() {
 
   if (touch_input.released_action == TouchAction::ToggleMenu) {
     g_world.menu_visible = !g_world.menu_visible;
+    g_touch_ui_dirty = true;
     g_needs_redraw = true;
   }
 
@@ -2726,6 +2844,7 @@ void update_controls() {
 
   if (touch_input.released_action == TouchAction::ToggleChrome) {
     g_world.chrome_visible = !g_world.chrome_visible;
+    g_touch_ui_dirty = true;
     g_needs_redraw = true;
   }
 
@@ -2734,6 +2853,7 @@ void update_controls() {
       toggle_ui_menu_value(g_world, g_world.menu_index);
     } else {
       g_world.auto_flight = !g_world.auto_flight;
+      g_touch_ui_dirty = true;
     }
     g_needs_redraw = true;
   }
@@ -2755,6 +2875,13 @@ void setup() {
   g_canvas.createSprite(M5.Display.width(), M5.Display.height());
   g_canvas.setTextFont(1);
   g_canvas.setTextSize(1);
+
+  g_touch_ui_cache.setColorDepth(16);
+  g_touch_ui_cache.createSprite(M5.Display.width(), M5.Display.height());
+  g_touch_ui_cache.setTextFont(1);
+  g_touch_ui_cache.setTextSize(1);
+
+  g_touch_layout = build_touch_layout(M5.Display.width(), M5.Display.height());
 
   g_world.init();
   g_last_frame_ms = millis();

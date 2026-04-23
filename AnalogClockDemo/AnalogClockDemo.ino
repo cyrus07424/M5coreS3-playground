@@ -93,13 +93,17 @@ enum class Action : unsigned char {
   Reset,
 };
 
-M5Canvas g_canvas(&M5.Display);
+M5Canvas g_frame_canvas(&M5.Display);
+M5Canvas g_background_canvas(&M5.Display);
+M5Canvas* g_active_canvas = &g_frame_canvas;
+#define g_canvas (*g_active_canvas)
 
 DateTime g_clock_time = {};
 bool g_clock_from_system = false;
 uint32_t g_last_clock_ms = 0;
 uint32_t g_last_frame_ms = 0;
 bool g_center_clock_mode = false;
+bool g_background_dirty = true;
 
 double g_starttime = 0.0;
 double g_stoptime = 0.0;
@@ -944,10 +948,20 @@ void draw_info_panel() {
   g_canvas.print("PWR:center");
 }
 
-void draw_ui() {
+void rebuild_background_cache() {
+  g_active_canvas = &g_background_canvas;
   g_canvas.fillScreen(kBlack);
   draw_quadrant_guide();
   draw_surface();
+  g_active_canvas = &g_frame_canvas;
+  g_background_dirty = false;
+}
+
+void draw_ui() {
+  if (g_background_dirty) {
+    rebuild_background_cache();
+  }
+  g_background_canvas.pushSprite(&g_frame_canvas, 0, 0);
   draw_analog_clock();
   draw_info_panel();
   g_canvas.pushSprite(&M5.Display, 0, 0);
@@ -956,6 +970,7 @@ void draw_ui() {
 void handle_input() {
   if (M5.BtnPWR.wasClicked()) {
     g_center_clock_mode = !g_center_clock_mode;
+    g_background_dirty = true;
   }
   const auto touch_count = M5.Touch.getCount();
   for (size_t i = 0; i < touch_count; ++i) {
@@ -979,10 +994,15 @@ void setup() {
   M5.Display.setTextFont(1);
   M5.Display.setTextSize(1);
 
-  g_canvas.setColorDepth(16);
-  g_canvas.createSprite(M5.Display.width(), M5.Display.height());
-  g_canvas.setTextFont(1);
-  g_canvas.setTextSize(1);
+  g_frame_canvas.setColorDepth(16);
+  g_frame_canvas.createSprite(M5.Display.width(), M5.Display.height());
+  g_frame_canvas.setTextFont(1);
+  g_frame_canvas.setTextSize(1);
+
+  g_background_canvas.setColorDepth(16);
+  g_background_canvas.createSprite(M5.Display.width(), M5.Display.height());
+  g_background_canvas.setTextFont(1);
+  g_background_canvas.setTextSize(1);
 
   variable_init();
   g_clock_time = system_time_seed(&g_clock_from_system);
