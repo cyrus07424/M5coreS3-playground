@@ -23,9 +23,13 @@ constexpr size_t MAX_NOTES_WITH_PSRAM = 65536;
 
 constexpr uint8_t AUDIO_CHANNEL = 0;
 constexpr uint32_t AUDIO_SAMPLE_RATE = 44100;
-constexpr size_t AUDIO_BUFFER_COUNT = 3;
-constexpr size_t AUDIO_BUFFER_SAMPLES = 1024;
+constexpr size_t AUDIO_BUFFER_COUNT = 6;
+constexpr size_t AUDIO_BUFFER_SAMPLES = 4096;
+constexpr size_t AUDIO_QUEUE_TARGET = 2;
 constexpr uint8_t AUDIO_VOLUME = 180;
+constexpr uint32_t PLAYER_REDRAW_MS = 66;
+constexpr uint32_t PLAYER_REDRAW_MS_LIVE = 100;
+constexpr uint32_t AUDIO_STOP_TIMEOUT_MS = 250;
 
 constexpr int32_t CLOCKS_PER_NOTE = 0x100;
 constexpr int32_t DEFAULT_VIEW_SPAN = EVENTDEFAULT_BEATCLOCK * 8;
@@ -119,6 +123,7 @@ static bool g_song_loaded = false;
 static bool g_song_playing = false;
 static bool g_song_paused = false;
 static bool g_song_finished = false;
+static bool g_song_has_loop = false;
 static bool g_song_queue_draining = false;
 static bool g_song_notes_truncated = false;
 static int32_t g_song_resume_sample = 0;
@@ -143,6 +148,11 @@ static bool g_audio_started = false;
 void set_status(const String& message) {
   g_status_message = message;
   g_needs_redraw = true;
+}
+
+void set_status_now(const String& message) {
+  set_status(message);
+  draw_screen();
 }
 
 String format_pxtone_error(const char* prefix, pxtnERR error) {
@@ -459,6 +469,12 @@ bool is_black_key(int note_index) {
 
 void stop_audio_output() {
   M5.Speaker.stop(app_config::AUDIO_CHANNEL);
+  const uint32_t started_at = millis();
+  while (M5.Speaker.isPlaying(app_config::AUDIO_CHANNEL) != 0 &&
+         millis() - started_at < app_config::AUDIO_STOP_TIMEOUT_MS) {
+    delay(1);
+  }
+  memset(g_audio_buffers, 0, sizeof(g_audio_buffers));
   g_audio_started = false;
   g_audio_buffer_index = 0;
   g_song_queue_draining = false;
@@ -491,6 +507,7 @@ void release_song() {
   g_song_playing = false;
   g_song_paused = false;
   g_song_finished = false;
+  g_song_has_loop = false;
   g_song_resume_sample = 0;
   g_song_total_samples = 0;
   g_song_current_sample = 0;
@@ -592,7 +609,7 @@ bool prepare_song_playback(int32_t start_sample) {
     return false;
   }
 
-  g_song_service->moo_set_loop(false);
+  g_song_service->moo_set_loop(g_song_has_loop);
   g_song_end_clock = g_song_service->moo_get_end_clock();
   g_song_repeat_clock = g_song_service->master->get_repeat_meas() *
                         g_song_service->master->get_beat_num() *
@@ -659,11 +676,18 @@ bool build_song_cache() {
   g_song_cache_bytes = cache_bytes;
 
   int32_t rendered_samples = 0;
+  int last_reported_percent = -10;
   while (rendered_samples < total_samples) {
     int16_t* buffer = g_song_cache_samples + rendered_samples;
     const int32_t chunk_samples = min<int32_t>(app_config::AUDIO_BUFFER_SAMPLES, total_samples - rendered_samples);
     g_song_service->Moo(buffer, chunk_samples * sizeof(int16_t));
     rendered_samples += chunk_samples;
+
+    const int percent = static_cast<int>((static_cast<int64_t>(rendered_samples) * 100) / total_samples);
+    if (percent >= last_reported_percent + 10 || rendered_samples >= total_samples) {
+      last_reported_percent = percent;
+      set_status_now(String("Caching PCM ") + percent + "%");
+    }
   }
 
   g_song_cached = true;
@@ -715,6 +739,9 @@ bool start_song_playback(int32_t start_sample) {
   g_song_finished = false;
   g_song_queue_draining = false;
   g_needs_redraw = true;
+  g_last_player_redraw_ms = millis();
+  draw_screen();
+  service_song_audio();
   return true;
 }
 
@@ -738,7 +765,7 @@ void service_song_audio() {
   }
 
   if (g_playback_source == PlaybackSource::MemoryCache) {
-    while (M5.Speaker.isPlaying(app_config::AUDIO_CHANNEL) < 2) {
+    while (M5.Speaker.isPlaying(app_config::AUDIO_CHANNEL) < app_config::AUDIO_QUEUE_TARGET) {
       const int32_t remaining_samples = g_song_total_samples - g_song_current_sample;
       if (!g_song_cache_samples || remaining_samples <= 0) {
         g_song_queue_draining = true;
@@ -777,7 +804,7 @@ void service_song_audio() {
       return;
     }
 
-    while (M5.Speaker.isPlaying(app_config::AUDIO_CHANNEL) < 2) {
+    while (M5.Speaker.isPlaying(app_config::AUDIO_CHANNEL) < app_config::AUDIO_QUEUE_TARGET) {
       int16_t* buffer = g_audio_buffers[g_audio_buffer_index];
       const bool ok = g_song_service->Moo(buffer, sizeof(g_audio_buffers[0]));
       const bool queued = M5.Speaker.playRaw(
@@ -809,6 +836,7 @@ void service_song_audio() {
 
 bool load_song(const String& path) {
   release_song();
+  set_status_now("Opening " + fit_text(base_name(path), 18));
 
   g_song_file = SD.open(path.c_str(), FILE_READ);
   if (!g_song_file || g_song_file.isDirectory()) {
@@ -837,6 +865,7 @@ bool load_song(const String& path) {
     return false;
   }
 
+  set_status_now("Loading song data");
   error = g_song_service->read(&g_song_file);
   if (error != pxtnOK) {
     set_status(format_pxtone_error("Load", error) + " " + format_memory_status());
@@ -844,6 +873,7 @@ bool load_song(const String& path) {
     return false;
   }
 
+  set_status_now("Preparing tones");
   error = g_song_service->tones_ready();
   if (error != pxtnOK) {
     set_status(format_pxtone_error("Tone", error) + " " + format_memory_status());
@@ -868,9 +898,14 @@ bool load_song(const String& path) {
   g_song_loaded = true;
   g_view_span_clock = app_config::DEFAULT_VIEW_SPAN;
   g_view_center_clock = 0;
+  g_song_repeat_clock = g_song_service->master->get_repeat_meas() *
+                        g_song_service->master->get_beat_num() *
+                        g_song_service->master->get_beat_clock();
+  g_song_has_loop = g_song_repeat_clock > 0;
   g_screen = AppScreen::Player;
+  set_status_now(g_song_has_loop ? "Loop song: live playback" : "Caching PCM 0%");
 
-  const bool cache_ready = build_song_cache();
+  const bool cache_ready = g_song_has_loop ? false : build_song_cache();
   if (cache_ready && g_song_service) {
     delete g_song_service;
     g_song_service = nullptr;
@@ -881,7 +916,7 @@ bool load_song(const String& path) {
     return false;
   }
 
-  set_status(String(cache_ready ? "Cached(mem) " : "Loaded ") + fit_text(base_name(path), 18));
+  set_status(String(cache_ready ? "Cached(mem) " : (g_song_has_loop ? "Loop/live " : "Loaded ")) + fit_text(base_name(path), 18));
   return true;
 }
 
@@ -893,6 +928,26 @@ void draw_battery_status() {
   g_canvas.printf("%3d%%", capped_level);
 }
 
+void draw_header_status(const char* title) {
+  const int title_right = 6 + g_canvas.textWidth(title) + 10;
+  const int status_left = title_right + 4;
+  const int status_right = app_config::SCREEN_W - 52;
+  const int status_width = status_right - status_left;
+  if (status_width <= 8) {
+    return;
+  }
+
+  String status = g_status_message;
+  while (status.length() > 4 && g_canvas.textWidth(status) > status_width) {
+    status = fit_text(status, status.length() - 1);
+  }
+
+  g_canvas.setTextColor(COLOR_TEXT_DIM, COLOR_PANEL);
+  const int text_x = status_left + (status_width - g_canvas.textWidth(status)) / 2;
+  g_canvas.setCursor(text_x, 4);
+  g_canvas.print(status);
+}
+
 void draw_header(const char* title) {
   g_canvas.fillScreen(COLOR_BG);
   g_canvas.fillRoundRect(0, 0, app_config::SCREEN_W, 18, 6, COLOR_PANEL);
@@ -900,6 +955,7 @@ void draw_header(const char* title) {
   g_canvas.setTextColor(COLOR_ACCENT, COLOR_PANEL);
   g_canvas.setCursor(6, 4);
   g_canvas.print(title);
+  draw_header_status(title);
   draw_battery_status();
 }
 
@@ -1098,7 +1154,7 @@ void draw_player_screen() {
   g_canvas.setCursor(4, 64);
   g_canvas.printf("Rate %luHz", static_cast<unsigned long>(app_config::AUDIO_SAMPLE_RATE));
   g_canvas.setCursor(4, 80);
-  g_canvas.printf("Mode %s", g_song_cached ? "Memory" : "Live");
+  g_canvas.printf("Mode %s", g_song_cached ? "Memory" : (g_song_has_loop ? "Live(loop)" : "Live"));
   draw_footer("Touch buttons: back / play-pause / restart");
   draw_player_touch_controls();
 }
@@ -1116,9 +1172,6 @@ void draw_screen() {
     draw_player_screen();
   }
 
-  g_canvas.setTextColor(COLOR_TEXT_DIM, COLOR_BG);
-  g_canvas.setCursor(4, status_line_y() - 12);
-  g_canvas.print(fit_text(g_status_message, app_config::SCREEN_W >= 320 ? 52 : 38));
   g_canvas.pushSprite(0, 0);
   g_needs_redraw = false;
 }
@@ -1266,6 +1319,10 @@ void setup() {
 
   auto speaker_cfg = M5.Speaker.config();
   speaker_cfg.sample_rate = app_config::AUDIO_SAMPLE_RATE;
+  speaker_cfg.dma_buf_len = 1024;
+  speaker_cfg.dma_buf_count = 12;
+  speaker_cfg.task_priority = 3;
+  speaker_cfg.task_pinned_core = 0;
   M5.Speaker.config(speaker_cfg);
   M5.Speaker.begin();
   M5.Speaker.setVolume(app_config::AUDIO_VOLUME);
@@ -1291,7 +1348,9 @@ void loop() {
   handle_touch_input();
   service_song_audio();
 
-  if (g_song_playing && millis() - g_last_player_redraw_ms >= 33) {
+  const uint32_t redraw_interval =
+      (g_song_has_loop && !g_song_cached) ? app_config::PLAYER_REDRAW_MS_LIVE : app_config::PLAYER_REDRAW_MS;
+  if (g_song_playing && millis() - g_last_player_redraw_ms >= redraw_interval) {
     g_needs_redraw = true;
     g_last_player_redraw_ms = millis();
   }
