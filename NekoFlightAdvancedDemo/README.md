@@ -1,0 +1,40 @@
+# NekoFlightAdvancedDemo
+
+`NekoFlight` を M5CoreS3 向けに Arduino/C++ へ移植した 3D フライトデモです。元の `Plane` / `Wing` / `Bullet` / `Missile` の挙動をベースに、CoreS3 の 320x240 画面とタッチ操作で遊べるようにしています。
+
+## 必要なライブラリ
+
+- M5Unified
+
+## Arduino IDE 設定
+
+- 開くファイル: `NekoFlightAdvancedDemo.ino`
+- ボード: `m5stack:esp32:m5stack_cores3`
+
+## 操作
+
+1. 画面左下の `UP / DN / LT / RT` でピッチ / ロール操縦
+2. 画面右下の `FIRE` で射撃 / ミサイル
+3. 画面右下の `BOOST` でブースト
+4. 左上の `RST` でステージを即リセット
+5. 右上の `AUTO` で AUTO / MANUAL を切り替え
+6. 右上の `MENU` で左側の UI 設定ポップアップメニューを表示 / 非表示
+7. ポップアップメニュー表示中は `UP / DN` で項目移動、`OK` で各 UI 部品（Heading Tape、ロックオン枠、AAM残数、GUNヒートバーを含む）の描画 ON / OFF を切り替え
+8. 左上の `HUD` で **ヘッダー / モードバナー / フッター** の表示 / 非表示をまとめて切り替え（他の HUD 部品の個別設定は保持）
+
+## 概要
+
+- Java/Swing 版の簡易飛行物理、敵 AI、機銃、ミサイルを M5CoreS3 上へ移植
+- 地表グリッド、敵機ワイヤーフレーム、弾道、ミサイル煙を 320x240 画面へ描画
+- 進行方位テープ、速度・高度・操縦モードを画面中央寄りの戦闘機風 HUD として重ね描きし、ピッチラダーで機体姿勢を表示
+- 射線方向へ追従する可動レティクルと、敵方向を示すオレンジ矢印を HUD 上に表示
+- 右側にはターゲット距離 `TGT` をオレンジ系の HUD パネルで表示
+- 画面下部には `AAM xx/xx` の残弾表示と、`GUN` ヒートバーを追加
+- 起動直後は自動操縦で飛行し、手動介入や AUTO 切り替えが可能
+
+## メモ
+
+- 地形は元コード同様に平地です
+- サウンドは未実装です
+- `NekoFlightAdvancedDemo.ino` の `app_config::SHOW_AAM_LABEL` を切り替えると、AAM HUD 上段の `AAM` テキスト表示をコンパイル時に変更できます
+- `NekoFlightAdvancedDemo.ino` の `app_config::SHOW_GUN_HEAT_LABEL` を切り替えると、GUNヒートバー上の `GUN` テキスト表示をコンパイル時に変更できます
